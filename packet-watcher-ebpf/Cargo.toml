@@ -1,0 +1,18 @@
+[package]
+name = "packet-watcher-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+packet-watcher-common = { path = "../packet-watcher-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+network-types = { workspace = true }
+
+[build-dependencies]
+which = { workspace = true }
+
+[[bin]]
+name = "packet-watcher"
+path = "src/main.rs"
