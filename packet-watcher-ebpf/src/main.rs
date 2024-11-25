@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    bindings::TC_ACT_PIPE,
+    bindings::TC_ACT_OK,
     cty::c_long,
     macros::{classifier, map},
     maps::PerfEventArray,
@@ -14,7 +14,7 @@ use core::mem;
 use network_types::{
     eth::{EthHdr, EtherType},
     icmp::IcmpHdr,
-    ip::{IpProto, Ipv4Hdr, Ipv6Hdr},
+    ip::{IpProto, Ipv4Hdr},
     tcp::TcpHdr,
     udp::UdpHdr,
 };
@@ -32,25 +32,17 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[map]
-static mut EVENTS: PerfEventArray<PacketInfo> = PerfEventArray::<PacketInfo>::new(0);
+static mut INGRESS_EVENTS: PerfEventArray<PacketInfo> = PerfEventArray::<PacketInfo>::new(0);
 
 #[classifier]
-pub fn ingress(ctx: TcContext) -> i32 {
-    match unsafe { try_chinuxwall(ctx) } {
+pub fn ingress_filter(ctx: TcContext) -> i32 {
+    match unsafe { try_ingress_filter(ctx) } {
         Ok(ret) => ret,
         Err(ret) => ret as i32,
     }
 }
 
-#[classifier]
-pub fn egress(ctx: TcContext) -> i32 {
-    match unsafe { try_chinuxwall(ctx) } {
-        Ok(ret) => ret,
-        Err(ret) => ret as i32,
-    }
-}
-
-unsafe fn try_chinuxwall(ctx: TcContext) -> Result<i32, c_long> {
+unsafe fn try_ingress_filter(ctx: TcContext) -> Result<i32, c_long> {
     let eth_hdr: EthHdr = ctx.load(0).map_err(|_| -1)?;
     let ipv4_hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN) }.map_err(|_| -1)?;
     let packet_len = u16::from_be(unsafe { *ipv4_hdr }.tot_len) as u32;
@@ -70,7 +62,7 @@ unsafe fn try_chinuxwall(ctx: TcContext) -> Result<i32, c_long> {
                 unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
 
             if unsafe { *tcp_hdr }.syn() == 0 || unsafe { *tcp_hdr }.ack() != 0 {
-                return Ok(TC_ACT_PIPE);
+                return Ok(TC_ACT_OK);
             }
 
             let src_port = u16::from_be(unsafe { *tcp_hdr }.source) as u32;
@@ -95,14 +87,26 @@ unsafe fn try_chinuxwall(ctx: TcContext) -> Result<i32, c_long> {
             let icmp_hdr: *const IcmpHdr =
                 unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
         }
-        (_, _) => return Ok(TC_ACT_PIPE),
+        (_, _) => return Ok(TC_ACT_OK),
     };
 
     unsafe {
-        EVENTS.output(&ctx, &packet_info, 0);
+        INGRESS_EVENTS.output(&ctx, &packet_info, 0);
     }
 
-    Ok(TC_ACT_PIPE)
+    Ok(TC_ACT_OK)
+}
+
+#[classifier]
+pub fn egress_filter(ctx: TcContext) -> i32 {
+    match unsafe { try_egress_filter(ctx) } {
+        Ok(ret) => ret,
+        Err(ret) => ret as i32,
+    }
+}
+
+unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
+    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| -1)?;
 }
 
 #[inline(always)]

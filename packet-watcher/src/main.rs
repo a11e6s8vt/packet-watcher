@@ -51,16 +51,18 @@ async fn main() -> anyhow::Result<()> {
     }
     let _ = tc::qdisc_add_clsact(&opt.iface);
 
-    let ingress_prog: &mut SchedClassifier = ebpf.program_mut("ingress").unwrap().try_into()?;
+    let ingress_prog: &mut SchedClassifier =
+        ebpf.program_mut("ingress_filter").unwrap().try_into()?;
     ingress_prog.load()?;
     ingress_prog.attach(&opt.iface, TcAttachType::Ingress)?;
 
-    let mut perf_array = AsyncPerfEventArray::try_from(ebpf.take_map("EVENTS").unwrap())?;
+    let mut perf_array_ingress =
+        AsyncPerfEventArray::try_from(ebpf.take_map("INGRESS_EVENTS").unwrap())?;
 
     let cpus = online_cpus().unwrap_or_default();
     let num_cpus = cpus.len();
     for cpu_id in cpus {
-        let mut buf = perf_array.open(cpu_id, None)?;
+        let mut buf = perf_array_ingress.open(cpu_id, None)?;
 
         task::spawn(async move {
             let mut buffers = (0..num_cpus)
@@ -105,18 +107,6 @@ async fn main() -> anyhow::Result<()> {
                         log_entry.push_str(&format!("DEST_PORT {}", data.dest_port.unwrap()));
                     }
 
-                    // println!(
-                    //     "LOG: LEN {}, SBK_LEN {}, UDP_LEN {}, SRC_IP {}, SRC_PORT {}, ETH_PROTO 0x{:X}, IP_PROTO {}, DEST_IP {}, DEST_PORT {} ",
-                    //     data.packet_len,
-                    //     data.skb_len,
-                    //     data.udp_len,
-                    //     Ipv4Addr::from(data.src_addr),
-                    //     data.src_port,
-                    //     data.eth_proto,
-                    //     data.ip_proto,
-                    //     Ipv4Addr::from(data.dest_addr),
-                    //     data.dest_port,
-                    // );
                     println!("{}", log_entry);
                 }
             }
