@@ -3,17 +3,17 @@ use aya::{
     maps::AsyncPerfEventArray,
     programs::{tc, SchedClassifier, TcAttachType},
     util::online_cpus,
-    Ebpf,
 };
 
 use aya_log::BpfLogger;
 use bytes::BytesMut;
 use clap::Parser;
-use packet_watcher_common::PacketInfo;
+use packet_watcher_common::IngressEvent;
+use pnet_datalink::interfaces;
 #[rustfmt::skip]
 use log::{debug, warn};
-use std::{arch::x86_64::_SIDD_MASKED_POSITIVE_POLARITY, net::Ipv4Addr};
-use tokio::{signal, task};
+use std::sync::Arc;
+use tokio::{signal, sync::Mutex, task};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -25,6 +25,25 @@ struct Opt {
 async fn main() -> anyhow::Result<()> {
     let opt = Opt::parse();
     env_logger::init();
+
+    let all_interfaces = interfaces();
+
+    // Search for the default interface - the one that is
+    // up, not loopback and has an IP.
+    let default_interface = all_interfaces
+        .iter()
+        .find(|e| e.is_up() && !e.is_loopback() && !e.ips.is_empty());
+
+    let interface_name = match default_interface {
+        Some(interface) => {
+            println!("Found default interface with [{}].", interface.name.clone());
+            interface.name.clone()
+        }
+        None => {
+            println!("Error while finding the default interface.");
+            return Ok(());
+        }
+    };
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -41,24 +60,32 @@ async fn main() -> anyhow::Result<()> {
     // runtime. This approach is recommended for most real-world use cases. If you would
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
-    let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
-        env!("OUT_DIR"),
-        "/packet-watcher"
-    )))?;
-    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
+    let ebpf = Arc::new(Mutex::new(aya::Ebpf::load(aya::include_bytes_aligned!(
+        concat!(env!("OUT_DIR"), "/packet-watcher")
+    ))?));
+
+    let mut bpf = ebpf.lock().await;
+    if let Err(e) = aya_log::EbpfLogger::init(&mut bpf) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
     }
-    let _ = tc::qdisc_add_clsact(&opt.iface);
+    let _ = tc::qdisc_add_clsact(&interface_name);
 
     let ingress_prog: &mut SchedClassifier =
-        ebpf.program_mut("ingress_filter").unwrap().try_into()?;
+        bpf.program_mut("ingress_filter").unwrap().try_into()?;
     ingress_prog.load()?;
-    ingress_prog.attach(&opt.iface, TcAttachType::Ingress)?;
+
+    ingress_prog.attach(&interface_name, TcAttachType::Ingress)?;
+
+    // let egress_prog: &mut SchedClassifier =
+    //     ebpf.program_mut("egress_filter").unwrap().try_into()?;
+    // egress_prog.load()?;
+    // egress_prog.attach(&opt.iface, TcAttachType::Egress)?;
 
     let mut perf_array_ingress =
-        AsyncPerfEventArray::try_from(ebpf.take_map("INGRESS_EVENTS").unwrap())?;
+        AsyncPerfEventArray::try_from(bpf.take_map("INGRESS_EVENTS").unwrap())?;
 
+    drop(bpf);
     let cpus = online_cpus().unwrap_or_default();
     let num_cpus = cpus.len();
     for cpu_id in cpus {
@@ -66,46 +93,26 @@ async fn main() -> anyhow::Result<()> {
 
         task::spawn(async move {
             let mut buffers = (0..num_cpus)
-                .map(|_| BytesMut::with_capacity(std::mem::size_of::<PacketInfo>()))
+                .map(|_| BytesMut::with_capacity(std::mem::size_of::<IngressEvent>()))
                 .collect::<Vec<_>>();
 
             loop {
                 let events = buf.read_events(&mut buffers).await.unwrap();
                 for event in buffers.iter_mut().take(events.read) {
-                    let ptr = event.as_ptr() as *const PacketInfo;
+                    let ptr = event.as_ptr() as *const IngressEvent;
                     let data = unsafe { ptr.read_unaligned() };
 
                     let mut log_entry = String::new();
                     log_entry.push_str(&format!(
-                        "LOG: LEN: {}, SBK_LEN {}, ETH_PROTO {}, IP_PROTO {}, ",
-                        data.packet_len, data.skb_len, data.eth_proto, data.ip_proto
+                        "FAMILY: {}, PROTOCOL: {}, SRC_ADDR: {}:{}, DST_ADDR: {}:{}, PACKET_ACTION: {}",
+                        data.family(),
+                        data.protocol(),
+                        data.src_addr(),
+                        data.src_port,
+                        data.dst_addr(),
+                        data.dst_port,
+                        data.tc_act.format(),
                     ));
-
-                    if data.udp_len.is_some() {
-                        log_entry.push_str(&format!("UDP Length {}, ", data.udp_len.unwrap()));
-                    }
-
-                    if data.src_addr.is_some() {
-                        log_entry.push_str(&format!(
-                            "SRC_IP {}, ",
-                            Ipv4Addr::from(data.src_addr.unwrap())
-                        ));
-                    }
-
-                    if data.src_port.is_some() {
-                        log_entry.push_str(&format!("SRC_PORT {}, ", data.src_port.unwrap()));
-                    }
-
-                    if data.dest_addr.is_some() {
-                        log_entry.push_str(&format!(
-                            "DEST_IP {}, ",
-                            Ipv4Addr::from(data.dest_addr.unwrap())
-                        ));
-                    }
-
-                    if data.dest_port.is_some() {
-                        log_entry.push_str(&format!("DEST_PORT {}", data.dest_port.unwrap()));
-                    }
 
                     println!("{}", log_entry);
                 }

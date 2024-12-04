@@ -14,8 +14,9 @@ clap = { workspace = true, features = ["std", "derive"] }
 env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
+pnet_datalink = { workspace = true, package = "pnet_datalink" }
 simplelog = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal", "sync"] }
 
 [build-dependencies]
 cargo_metadata = { workspace = true }

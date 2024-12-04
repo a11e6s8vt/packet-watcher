@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    bindings::TC_ACT_OK,
+    bindings::{TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT},
     cty::c_long,
     macros::{classifier, map},
     maps::PerfEventArray,
@@ -19,7 +19,7 @@ use network_types::{
     udp::UdpHdr,
 };
 
-use packet_watcher_common::PacketInfo;
+use packet_watcher_common::{IngressEvent, TcAct};
 
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
@@ -32,7 +32,10 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[map]
-static mut INGRESS_EVENTS: PerfEventArray<PacketInfo> = PerfEventArray::<PacketInfo>::new(0);
+static mut INGRESS_EVENTS: PerfEventArray<IngressEvent> = PerfEventArray::<IngressEvent>::new(0);
+
+// #[map]
+// static mut EGRESS_EVENTS: PerfEventArray<PacketInfo> = PerfEventArray::<PacketInfo>::new(0);
 
 #[classifier]
 pub fn ingress_filter(ctx: TcContext) -> i32 {
@@ -45,18 +48,16 @@ pub fn ingress_filter(ctx: TcContext) -> i32 {
 unsafe fn try_ingress_filter(ctx: TcContext) -> Result<i32, c_long> {
     let eth_hdr: EthHdr = ctx.load(0).map_err(|_| -1)?;
     let ipv4_hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN) }.map_err(|_| -1)?;
-    let packet_len = u16::from_be(unsafe { *ipv4_hdr }.tot_len) as u32;
-    let skb_len = ctx.len();
-    let eth_proto = eth_hdr.ether_type;
-    let ip_proto = unsafe { *ipv4_hdr }.proto;
+    let family = eth_hdr.ether_type;
+    let protocol = unsafe { *ipv4_hdr }.proto;
 
-    let mut packet_info = PacketInfo::new(packet_len, skb_len, eth_proto as u16, ip_proto as u8);
-    let src_addr = u32::from_be(unsafe { *ipv4_hdr }.src_addr);
-    packet_info.set_src_addr(Some(src_addr));
-    let dest_addr = u32::from_be(unsafe { *ipv4_hdr }.dst_addr);
-    packet_info.set_dest_addr(Some(dest_addr));
+    let mut ingress_event: IngressEvent = core::mem::zeroed();
+    ingress_event.family = family as u16;
+    ingress_event.protocol = protocol as u8;
+    ingress_event.src_addr = u32::from_be(unsafe { *ipv4_hdr }.src_addr);
+    ingress_event.dst_addr = u32::from_be(unsafe { *ipv4_hdr }.dst_addr);
 
-    match (eth_proto, ip_proto) {
+    match (family, protocol) {
         (EtherType::Ipv4, IpProto::Tcp) => {
             let tcp_hdr: *const TcpHdr =
                 unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
@@ -65,10 +66,8 @@ unsafe fn try_ingress_filter(ctx: TcContext) -> Result<i32, c_long> {
                 return Ok(TC_ACT_OK);
             }
 
-            let src_port = u16::from_be(unsafe { *tcp_hdr }.source) as u32;
-            let dest_port = u16::from_be(unsafe { *tcp_hdr }.dest) as u32;
-            packet_info.set_src_port(Some(src_port));
-            packet_info.set_dest_port(Some(dest_port));
+            ingress_event.src_port = u16::from_be(unsafe { *tcp_hdr }.source);
+            ingress_event.dst_port = u16::from_be(unsafe { *tcp_hdr }.dest);
         }
         (EtherType::Ipv4, IpProto::Udp) => {
             // UDP Header - src port (2 octets - optional in ipv4)
@@ -76,38 +75,54 @@ unsafe fn try_ingress_filter(ctx: TcContext) -> Result<i32, c_long> {
             let udp_hdr: *const UdpHdr =
                 unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
 
-            let src_port = u16::from_be(unsafe { *udp_hdr }.source) as u32;
-            let dest_port = u16::from_be(unsafe { *udp_hdr }.dest) as u32;
-            packet_info.set_src_port(Some(src_port));
-            packet_info.set_dest_port(Some(dest_port));
-            packet_info.set_udp_len(Some(unsafe { *udp_hdr }.len as u32));
+            ingress_event.src_port = u16::from_be(unsafe { *udp_hdr }.source);
+            ingress_event.dst_port = u16::from_be(unsafe { *udp_hdr }.dest);
         }
         // TODO:
         (EtherType::Ipv4, IpProto::Icmp) => {
             let icmp_hdr: *const IcmpHdr =
                 unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
+            unsafe { *icmp_hdr }.type_;
+            return process_packet(&ctx, TcAct::Shot, &mut ingress_event);
         }
         (_, _) => return Ok(TC_ACT_OK),
     };
 
-    unsafe {
-        INGRESS_EVENTS.output(&ctx, &packet_info, 0);
-    }
-
     Ok(TC_ACT_OK)
 }
 
-#[classifier]
-pub fn egress_filter(ctx: TcContext) -> i32 {
-    match unsafe { try_egress_filter(ctx) } {
-        Ok(ret) => ret,
-        Err(ret) => ret as i32,
-    }
-}
+// #[classifier]
+// pub fn egress_filter(ctx: TcContext) -> i32 {
+//     match unsafe { try_egress_filter(ctx) } {
+//         Ok(ret) => ret,
+//         Err(ret) => ret as i32,
+//     }
+// }
 
-unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
-    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| -1)?;
-}
+// unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
+//     let eth_hdr: EthHdr = ctx.load(0).map_err(|_| -1)?;
+//     let ipv4_hdr: *const Ipv4Hdr =
+//         unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
+//     let packet_len = u16::from_be(unsafe { *ipv4_hdr }.tot_len) as u32;
+//     let skb_len = ctx.len();
+//     let eth_proto = eth_hdr.ether_type;
+//     let ip_proto = unsafe { *ipv4_hdr }.proto;
+//     let mut packet_info = PacketInfo::new(packet_len, skb_len, eth_proto as u16, ip_proto as u8);
+//     let src_addr = u32::from_be(unsafe { *ipv4_hdr }.src_addr);
+//     packet_info.set_src_addr(Some(src_addr));
+//     let dest_addr = u32::from_be(unsafe { *ipv4_hdr }.dst_addr);
+//     packet_info.set_dest_addr(Some(dest_addr));
+
+//     match (eth_proto, ip_proto) {
+//         (EtherType::Ipv4, IpProto::Icmp) => {
+//             // let icmp_hdr: *const IcmpHdr =
+//             //     unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
+
+//             return Ok(TC_ACT_SHOT);
+//         }
+//         (_, _) => return Ok(TC_ACT_OK),
+//     };
+// }
 
 #[inline(always)]
 unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
@@ -120,4 +135,22 @@ unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
     }
 
     Ok((start + offset) as *const T)
+}
+
+unsafe fn process_packet(
+    ctx: &TcContext,
+    tc_act: TcAct,
+    event: &mut IngressEvent,
+) -> Result<i32, c_long> {
+    event.tc_act = tc_act;
+
+    unsafe {
+        INGRESS_EVENTS.output(ctx, event, 0);
+    }
+
+    Ok(match tc_act {
+        TcAct::Ok => TC_ACT_OK,
+        TcAct::Shot => TC_ACT_SHOT,
+        TcAct::Pipe => TC_ACT_PIPE,
+    })
 }
