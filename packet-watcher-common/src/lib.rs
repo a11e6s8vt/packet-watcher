@@ -2,7 +2,7 @@
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct IngressEvent {
+pub struct TrafficEvent {
     pub family: u16, // `family` represents the which protocol is encapsulated in the ethernet_frame, eg: IPv4
     pub protocol: u8, // eg: TCP, UDP, etc
     pub src_addr: u32,
@@ -13,10 +13,10 @@ pub struct IngressEvent {
 }
 
 #[cfg(feature = "user")]
-unsafe impl aya::Pod for IngressEvent {}
+unsafe impl aya::Pod for TrafficEvent {}
 
 #[cfg(feature = "user")]
-impl IngressEvent {
+impl TrafficEvent {
     pub fn src_addr(&self) -> String {
         std::net::Ipv4Addr::from(self.src_addr).to_string()
     }

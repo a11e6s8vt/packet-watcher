@@ -1,14 +1,15 @@
 use aya::{
     include_bytes_aligned,
-    maps::AsyncPerfEventArray,
-    programs::{tc, SchedClassifier, TcAttachType},
+    maps::{AsyncPerfEventArray, MapData, MapError},
+    programs::{perf_event, tc, SchedClassifier, TcAttachType},
     util::online_cpus,
+    Ebpf,
 };
 
 use aya_log::BpfLogger;
 use bytes::BytesMut;
 use clap::Parser;
-use packet_watcher_common::IngressEvent;
+use packet_watcher_common::TrafficEvent;
 use pnet_datalink::interfaces;
 #[rustfmt::skip]
 use log::{debug, warn};
@@ -56,50 +57,55 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
-    // This will include your eBPF object file as raw bytes at compile-time and load it at
-    // runtime. This approach is recommended for most real-world use cases. If you would
-    // like to specify the eBPF program at runtime rather than at compile-time, you can
-    // reach for `Bpf::load_file` instead.
-    let ebpf = Arc::new(Mutex::new(aya::Ebpf::load(aya::include_bytes_aligned!(
-        concat!(env!("OUT_DIR"), "/packet-watcher")
-    ))?));
+    let runner = BpfRunner::new()?;
+    runner.load().await?;
 
-    let mut bpf = ebpf.lock().await;
-    if let Err(e) = aya_log::EbpfLogger::init(&mut bpf) {
-        // This can happen if you remove all log statements from your eBPF program.
-        warn!("failed to initialize eBPF logger: {}", e);
-    }
-    let _ = tc::qdisc_add_clsact(&interface_name);
+    let mut perf_array_ingress = runner.read_ingress_events().await?;
+    let mut perf_array_egress = runner.read_egress_events().await?;
 
-    let ingress_prog: &mut SchedClassifier =
-        bpf.program_mut("ingress_filter").unwrap().try_into()?;
-    ingress_prog.load()?;
-
-    ingress_prog.attach(&interface_name, TcAttachType::Ingress)?;
-
-    // let egress_prog: &mut SchedClassifier =
-    //     ebpf.program_mut("egress_filter").unwrap().try_into()?;
-    // egress_prog.load()?;
-    // egress_prog.attach(&opt.iface, TcAttachType::Egress)?;
-
-    let mut perf_array_ingress =
-        AsyncPerfEventArray::try_from(bpf.take_map("INGRESS_EVENTS").unwrap())?;
-
-    drop(bpf);
     let cpus = online_cpus().unwrap_or_default();
     let num_cpus = cpus.len();
     for cpu_id in cpus {
-        let mut buf = perf_array_ingress.open(cpu_id, None)?;
+        let mut ingress_buf = perf_array_ingress.open(cpu_id, None)?;
+        let mut egress_buf = perf_array_egress.open(cpu_id, None)?;
 
         task::spawn(async move {
             let mut buffers = (0..num_cpus)
-                .map(|_| BytesMut::with_capacity(std::mem::size_of::<IngressEvent>()))
+                .map(|_| BytesMut::with_capacity(std::mem::size_of::<TrafficEvent>()))
                 .collect::<Vec<_>>();
 
             loop {
-                let events = buf.read_events(&mut buffers).await.unwrap();
+                let events = ingress_buf.read_events(&mut buffers).await.unwrap();
                 for event in buffers.iter_mut().take(events.read) {
-                    let ptr = event.as_ptr() as *const IngressEvent;
+                    let ptr = event.as_ptr() as *const TrafficEvent;
+                    let data = unsafe { ptr.read_unaligned() };
+
+                    let mut log_entry = String::new();
+                    log_entry.push_str(&format!(
+                        "FAMILY: {}, PROTOCOL: {}, SRC_ADDR: {}:{}, DST_ADDR: {}:{}, PACKET_ACTION: {}",
+                        data.family(),
+                        data.protocol(),
+                        data.src_addr(),
+                        data.src_port,
+                        data.dst_addr(),
+                        data.dst_port,
+                        data.tc_act.format(),
+                    ));
+
+                    println!("{}", log_entry);
+                }
+            }
+        });
+
+        task::spawn(async move {
+            let mut buffers = (0..num_cpus)
+                .map(|_| BytesMut::with_capacity(std::mem::size_of::<TrafficEvent>()))
+                .collect::<Vec<_>>();
+
+            loop {
+                let events = egress_buf.read_events(&mut buffers).await.unwrap();
+                for event in buffers.iter_mut().take(events.read) {
+                    let ptr = event.as_ptr() as *const TrafficEvent;
                     let data = unsafe { ptr.read_unaligned() };
 
                     let mut log_entry = String::new();
@@ -126,4 +132,83 @@ async fn main() -> anyhow::Result<()> {
     println!("Exiting...");
 
     Ok(())
+}
+
+struct BpfRunner {
+    ebpf: Arc<Mutex<Ebpf>>,
+}
+
+impl BpfRunner {
+    pub fn new() -> anyhow::Result<Self> {
+        let ebpf = Arc::new(Mutex::new(aya::Ebpf::load(aya::include_bytes_aligned!(
+            concat!(env!("OUT_DIR"), "/packet-watcher")
+        ))?));
+        Ok(Self { ebpf })
+    }
+
+    pub async fn read_ingress_events(
+        &self,
+    ) -> anyhow::Result<AsyncPerfEventArray<MapData>, MapError> {
+        let mut bpf = self.ebpf.lock().await;
+        let perf_event_arr = AsyncPerfEventArray::try_from(bpf.take_map("INGRESS_EVENTS").unwrap());
+        drop(bpf);
+        perf_event_arr
+    }
+
+    pub async fn read_egress_events(
+        &self,
+    ) -> anyhow::Result<AsyncPerfEventArray<MapData>, MapError> {
+        let mut bpf = self.ebpf.lock().await;
+        let perf_event_arr = AsyncPerfEventArray::try_from(bpf.take_map("EGRESS_EVENTS").unwrap());
+        drop(bpf);
+        perf_event_arr
+    }
+
+    pub async fn load(&self) -> anyhow::Result<()> {
+        let mut bpf = self.ebpf.lock().await;
+        if let Err(e) = aya_log::EbpfLogger::init(&mut bpf) {
+            // This can happen if you remove all log statements from your eBPF program.
+            warn!("failed to initialize eBPF logger: {}", e);
+        }
+
+        let program: &mut SchedClassifier =
+            bpf.program_mut("ingress_filter").unwrap().try_into()?;
+        program.load()?;
+
+        let program: &mut SchedClassifier = bpf.program_mut("egress_filter").unwrap().try_into()?;
+        program.load()?;
+
+        drop(bpf);
+        self.attach().await?;
+
+        Ok(())
+    }
+
+    async fn attach(&self) -> anyhow::Result<()> {
+        let mut bpf = self.ebpf.lock().await;
+        // Search for the default interface - the one that is
+        // up, not loopback and has an IP.
+        for interface in interfaces() {
+            if interface.is_up() && !interface.is_loopback() && !interface.ips.is_empty() {
+                let iface = interface.name.as_str();
+                println!("Found default interface with [{}].", iface);
+                let _ = tc::qdisc_add_clsact(iface);
+                println!("Found default interface with [{}].", iface);
+                let program: &mut SchedClassifier =
+                    bpf.program_mut("ingress_filter").unwrap().try_into()?;
+                match program.attach(iface, TcAttachType::Ingress) {
+                    Ok(_) => println!("Success"),
+                    Err(e) => println!("{:?}", e),
+                };
+
+                let program: &mut SchedClassifier =
+                    bpf.program_mut("egress_filter").unwrap().try_into()?;
+                program.attach(&iface, TcAttachType::Egress)?;
+            }
+        }
+
+        drop(bpf);
+
+        Ok(())
+    }
 }
