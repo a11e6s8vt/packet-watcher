@@ -11,12 +11,17 @@ aya = { workspace = true }
 aya-log = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["std", "derive"] }
+color-eyre = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
+futures = { workspace = true }
+ratatui = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 pnet_datalink = { workspace = true, package = "pnet_datalink" }
 simplelog = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal", "sync", "full"] }
+tokio-util = { workspace = true } 
 
 [build-dependencies]
 cargo_metadata = { workspace = true }

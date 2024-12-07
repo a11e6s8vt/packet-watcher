@@ -5,6 +5,21 @@ use aya::{
     util::online_cpus,
     Ebpf,
 };
+use crossterm::{
+    cursor,
+    event::{self, Event, EventStream, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use futures::{FutureExt, StreamExt};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    widgets::{Block, Borders, Cell, List, ListItem, Row, Table},
+    Terminal,
+};
+use std::{io, time::Duration};
 
 use aya_log::BpfLogger;
 use bytes::BytesMut;
@@ -14,7 +29,11 @@ use pnet_datalink::interfaces;
 #[rustfmt::skip]
 use log::{debug, warn};
 use std::sync::Arc;
-use tokio::{signal, sync::Mutex, task};
+use tokio::{
+    select, signal,
+    sync::{mpsc, Mutex},
+    task, time,
+};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -57,74 +76,10 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
-    let runner = BpfRunner::new()?;
+    let runner = Arc::new(BpfRunner::new()?);
     runner.load().await?;
-
-    let mut perf_array_ingress = runner.read_ingress_events().await?;
-    let mut perf_array_egress = runner.read_egress_events().await?;
-
-    let cpus = online_cpus().unwrap_or_default();
-    let num_cpus = cpus.len();
-    for cpu_id in cpus {
-        let mut ingress_buf = perf_array_ingress.open(cpu_id, None)?;
-        let mut egress_buf = perf_array_egress.open(cpu_id, None)?;
-
-        task::spawn(async move {
-            let mut buffers = (0..num_cpus)
-                .map(|_| BytesMut::with_capacity(std::mem::size_of::<TrafficEvent>()))
-                .collect::<Vec<_>>();
-
-            loop {
-                let events = ingress_buf.read_events(&mut buffers).await.unwrap();
-                for event in buffers.iter_mut().take(events.read) {
-                    let ptr = event.as_ptr() as *const TrafficEvent;
-                    let data = unsafe { ptr.read_unaligned() };
-
-                    let mut log_entry = String::new();
-                    log_entry.push_str(&format!(
-                        "FAMILY: {}, PROTOCOL: {}, SRC_ADDR: {}:{}, DST_ADDR: {}:{}, PACKET_ACTION: {}",
-                        data.family(),
-                        data.protocol(),
-                        data.src_addr(),
-                        data.src_port,
-                        data.dst_addr(),
-                        data.dst_port,
-                        data.tc_act.format(),
-                    ));
-
-                    println!("{}", log_entry);
-                }
-            }
-        });
-
-        task::spawn(async move {
-            let mut buffers = (0..num_cpus)
-                .map(|_| BytesMut::with_capacity(std::mem::size_of::<TrafficEvent>()))
-                .collect::<Vec<_>>();
-
-            loop {
-                let events = egress_buf.read_events(&mut buffers).await.unwrap();
-                for event in buffers.iter_mut().take(events.read) {
-                    let ptr = event.as_ptr() as *const TrafficEvent;
-                    let data = unsafe { ptr.read_unaligned() };
-
-                    let mut log_entry = String::new();
-                    log_entry.push_str(&format!(
-                        "FAMILY: {}, PROTOCOL: {}, SRC_ADDR: {}:{}, DST_ADDR: {}:{}, PACKET_ACTION: {}",
-                        data.family(),
-                        data.protocol(),
-                        data.src_addr(),
-                        data.src_port,
-                        data.dst_addr(),
-                        data.dst_port,
-                        data.tc_act.format(),
-                    ));
-
-                    println!("{}", log_entry);
-                }
-            }
-        });
-    }
+    let logger = runner.clone();
+    tokio::spawn(async move { logger.display().await });
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
@@ -209,6 +164,75 @@ impl BpfRunner {
 
         drop(bpf);
 
+        Ok(())
+    }
+
+    async fn display(&self) -> anyhow::Result<()> {
+        let mut perf_array_ingress = self.read_ingress_events().await?;
+        let mut perf_array_egress = self.read_egress_events().await?;
+
+        let cpus = online_cpus().unwrap_or_default();
+        let num_cpus = cpus.len();
+        for cpu_id in cpus {
+            let mut ingress_buf = perf_array_ingress.open(cpu_id, None)?;
+            let mut egress_buf = perf_array_egress.open(cpu_id, None)?;
+
+            task::spawn(async move {
+                let mut buffers = (0..num_cpus)
+                    .map(|_| BytesMut::with_capacity(std::mem::size_of::<TrafficEvent>()))
+                    .collect::<Vec<_>>();
+
+                loop {
+                    let events = ingress_buf.read_events(&mut buffers).await.unwrap();
+                    for event in buffers.iter_mut().take(events.read) {
+                        let ptr = event.as_ptr() as *const TrafficEvent;
+                        let data = unsafe { ptr.read_unaligned() };
+
+                        let mut log_entry = String::new();
+                        log_entry.push_str(&format!(
+                        "FAMILY: {}, PROTOCOL: {}, SRC_ADDR: {}:{}, DST_ADDR: {}:{}, PACKET_ACTION: {}",
+                        data.family(),
+                        data.protocol(),
+                        data.src_addr(),
+                        data.src_port,
+                        data.dst_addr(),
+                        data.dst_port,
+                        data.tc_act.format(),
+                    ));
+
+                        println!("{}", log_entry);
+                    }
+                }
+            });
+
+            task::spawn(async move {
+                let mut buffers = (0..num_cpus)
+                    .map(|_| BytesMut::with_capacity(std::mem::size_of::<TrafficEvent>()))
+                    .collect::<Vec<_>>();
+
+                loop {
+                    let events = egress_buf.read_events(&mut buffers).await.unwrap();
+                    for event in buffers.iter_mut().take(events.read) {
+                        let ptr = event.as_ptr() as *const TrafficEvent;
+                        let data = unsafe { ptr.read_unaligned() };
+
+                        let mut log_entry = String::new();
+                        log_entry.push_str(&format!(
+                        "FAMILY: {}, PROTOCOL: {}, SRC_ADDR: {}:{}, DST_ADDR: {}:{}, PACKET_ACTION: {}",
+                        data.family(),
+                        data.protocol(),
+                        data.src_addr(),
+                        data.src_port,
+                        data.dst_addr(),
+                        data.dst_port,
+                        data.tc_act.format(),
+                    ));
+
+                        println!("{}", log_entry);
+                    }
+                }
+            });
+        }
         Ok(())
     }
 }

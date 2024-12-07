@@ -169,12 +169,7 @@ unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
             let icmp_hdr: *const IcmpHdr =
                 unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
             unsafe { *icmp_hdr }.type_;
-            return process_packet(
-                &ctx,
-                TcAct::Shot,
-                &mut egress_event,
-                TrafficDirection::Egress,
-            );
+            return process_packet(&ctx, TcAct::Ok, &mut egress_event, TrafficDirection::Egress);
         }
         (_, _) => return Ok(TC_ACT_OK),
     }
