@@ -41,7 +41,7 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
+    let _opt = Opt::parse();
     env_logger::init();
 
     let all_interfaces = interfaces();
@@ -52,14 +52,9 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .find(|e| e.is_up() && !e.is_loopback() && !e.ips.is_empty());
 
-    match default_interface {
-        Some(interface) => {
-            println!("Found default interface with [{}].", interface.name.clone());
-        }
-        None => {
-            println!("Error while finding the default interface.");
-            return Ok(());
-        }
+    if default_interface.is_none() {
+        println!("Error while finding the default interface.");
+        return Ok(());
     };
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
@@ -76,12 +71,13 @@ async fn main() -> anyhow::Result<()> {
     let runner = Arc::new(BpfRunner::new()?);
     runner.load().await?;
     let logger = runner.clone();
-    tokio::spawn(async move { logger.display().await });
+    // tokio::spawn(async move { logger.display().await });
+    logger.display().await?;
 
-    let ctrl_c = signal::ctrl_c();
-    println!("Waiting for Ctrl-C...");
-    ctrl_c.await?;
-    println!("Exiting...");
+    // let ctrl_c = signal::ctrl_c();
+    // println!("Waiting for Ctrl-C...");
+    // ctrl_c.await?;
+    // println!("Exiting...");
 
     Ok(())
 }
@@ -144,19 +140,14 @@ impl BpfRunner {
         for interface in interfaces() {
             if interface.is_up() && !interface.is_loopback() && !interface.ips.is_empty() {
                 let iface = interface.name.as_str();
-                println!("Found default interface with [{}].", iface);
                 let _ = tc::qdisc_add_clsact(iface);
-                println!("Found default interface with [{}].", iface);
                 let program: &mut SchedClassifier =
                     bpf.program_mut("ingress_filter").unwrap().try_into()?;
-                match program.attach(iface, TcAttachType::Ingress) {
-                    Ok(_) => println!("Success"),
-                    Err(e) => println!("{:?}", e),
-                };
+                program.attach(iface, TcAttachType::Ingress)?;
 
                 let program: &mut SchedClassifier =
                     bpf.program_mut("egress_filter").unwrap().try_into()?;
-                program.attach(&iface, TcAttachType::Egress)?;
+                program.attach(iface, TcAttachType::Egress)?;
             }
         }
 
@@ -356,7 +347,7 @@ impl BpfRunner {
             })?;
 
             // Add a small delay to prevent 100% CPU usage
-            std::thread::sleep(Duration::from_millis(100));
+            // std::thread::sleep(Duration::from_millis(100));
         }
 
         // Restore terminal state
@@ -364,6 +355,42 @@ impl BpfRunner {
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
         terminal.show_cursor()?;
 
+        // cleanup tc qdisc configs
+        tc_cleanup();
+
         Ok(())
+    }
+}
+
+pub fn tc_cleanup() {
+    for interface in interfaces() {
+        if interface.is_up() && !interface.is_loopback() && !interface.ips.is_empty() {
+            let iface = interface.name.as_str();
+            // tc::qdisc_detach_program(, , ) doesn't work unfortunately
+            // match tc::qdisc_detach_program(iface, TcAttachType::Ingress, "ingress_filter") {
+            //     Ok(_) => println!("TC qdisc configuration removed from {}", iface),
+            //     Err(e) => {
+            //         eprintln!(
+            //             "TC qdisc config couldn't be removed from {} with error {}",
+            //             iface, e
+            //         );
+            //         std::process::exit(1);
+            //     }
+            // }
+
+            // match tc::qdisc_detach_program(iface, TcAttachType::Egress, "egress_filter") {
+            //     Ok(_) => println!("TC qdisc configuration removed from {}", iface),
+            //     Err(e) => {
+            //         eprintln!(
+            //             "TC qdisc config couldn't be removed from {} with error {}",
+            //             iface, e
+            //         );
+            //         std::process::exit(1);
+            //     }
+            // }
+            let _ = std::process::Command::new("tc")
+                .args(&vec!["qdisc", "del", "dev", iface, "clsact"])
+                .output();
+        }
     }
 }
