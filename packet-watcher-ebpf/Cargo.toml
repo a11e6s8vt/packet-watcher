@@ -16,3 +16,7 @@ which = { workspace = true }
 [[bin]]
 name = "packet-watcher"
 path = "src/main.rs"
+
+[lib]
+name = "packet_watcher"
+path = "src/lib.rs"

@@ -18,7 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Row, Table},
     Terminal,
 };
-use std::{io, time::Duration};
+use std::io;
 
 use bytes::BytesMut;
 use clap::Parser;
@@ -28,7 +28,7 @@ use pnet_datalink::interfaces;
 use log::{debug, warn};
 use std::sync::Arc;
 use tokio::{
-    select, signal,
+    select,
     sync::{mpsc, Mutex},
     task,
 };
@@ -73,11 +73,6 @@ async fn main() -> anyhow::Result<()> {
     let logger = runner.clone();
     // tokio::spawn(async move { logger.display().await });
     logger.display().await?;
-
-    // let ctrl_c = signal::ctrl_c();
-    // println!("Waiting for Ctrl-C...");
-    // ctrl_c.await?;
-    // println!("Exiting...");
 
     Ok(())
 }
@@ -302,15 +297,6 @@ impl BpfRunner {
 
             // Draw UI
             terminal.draw(|f| {
-                // for item in &items {
-                //     rows.push(Row::from_iter(item.clone()));
-                // }
-
-                // Update scroll offset to keep the latest rows in view
-                // if items.len() > 40 {
-                //     scroll_offset += 1;
-                // }
-
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(100)].as_ref())
@@ -334,20 +320,8 @@ impl BpfRunner {
                         .borders(Borders::ALL),
                 )
                 .column_spacing(1);
-
-                // let list_items: Vec<ListItem> = items
-                //     .iter()
-                //     .map(|item| ListItem::new(item.join(" ").clone()))
-                //     .collect();
-
-                // let list = List::new(list_items)
-                //     .block(Block::default().borders(Borders::ALL).title("Async List"));
-
                 f.render_widget(table, chunks[0]);
             })?;
-
-            // Add a small delay to prevent 100% CPU usage
-            // std::thread::sleep(Duration::from_millis(100));
         }
 
         // Restore terminal state
