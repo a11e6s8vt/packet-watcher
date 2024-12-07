@@ -1,13 +1,13 @@
 use aya::{
     include_bytes_aligned,
     maps::{AsyncPerfEventArray, MapData, MapError},
-    programs::{perf_event, tc, SchedClassifier, TcAttachType},
+    programs::{tc, SchedClassifier, TcAttachType},
     util::online_cpus,
     Ebpf,
 };
 use crossterm::{
     cursor,
-    event::{self, Event, EventStream, KeyCode},
+    event::{Event, EventStream, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -15,13 +15,11 @@ use futures::{FutureExt, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    widgets::{Block, Borders, Cell, List, ListItem, Row, Table},
+    widgets::{Block, Borders, Cell, Row, Table},
     Terminal,
 };
 use std::{io, time::Duration};
 
-use aya_log::BpfLogger;
 use bytes::BytesMut;
 use clap::Parser;
 use packet_watcher_common::TrafficEvent;
@@ -32,7 +30,7 @@ use std::sync::Arc;
 use tokio::{
     select, signal,
     sync::{mpsc, Mutex},
-    task, time,
+    task,
 };
 
 #[derive(Debug, Parser)]
@@ -54,10 +52,9 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .find(|e| e.is_up() && !e.is_loopback() && !e.ips.is_empty());
 
-    let interface_name = match default_interface {
+    match default_interface {
         Some(interface) => {
             println!("Found default interface with [{}].", interface.name.clone());
-            interface.name.clone()
         }
         None => {
             println!("Error while finding the default interface.");
@@ -95,9 +92,10 @@ struct BpfRunner {
 
 impl BpfRunner {
     pub fn new() -> anyhow::Result<Self> {
-        let ebpf = Arc::new(Mutex::new(aya::Ebpf::load(aya::include_bytes_aligned!(
-            concat!(env!("OUT_DIR"), "/packet-watcher")
-        ))?));
+        let ebpf = Arc::new(Mutex::new(Ebpf::load(include_bytes_aligned!(concat!(
+            env!("OUT_DIR"),
+            "/packet-watcher"
+        )))?));
         Ok(Self { ebpf })
     }
 
@@ -168,12 +166,46 @@ impl BpfRunner {
     }
 
     async fn display(&self) -> anyhow::Result<()> {
+        // Setup terminal
+        enable_raw_mode()?;
+        let stdout = io::stdout();
+        execute!(std::io::stderr(), EnterAlternateScreen, cursor::Hide)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        // Header row
+        let header = Row::new(vec![
+            Cell::from("Family"),
+            Cell::from("Protocol"),
+            Cell::from("Local Addr."),
+            Cell::from("Remote Addr."),
+            Cell::from("Direction"),
+            Cell::from("Action"),
+        ]);
+
+        let widths = [
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+        ];
+
+        // Track scroll position
+        let mut scroll_offset = 0;
+
+        // Channel for async updates
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<String>>();
+
         let mut perf_array_ingress = self.read_ingress_events().await?;
         let mut perf_array_egress = self.read_egress_events().await?;
 
         let cpus = online_cpus().unwrap_or_default();
         let num_cpus = cpus.len();
+
         for cpu_id in cpus {
+            let tx_1 = tx.clone();
             let mut ingress_buf = perf_array_ingress.open(cpu_id, None)?;
             let mut egress_buf = perf_array_egress.open(cpu_id, None)?;
 
@@ -188,23 +220,21 @@ impl BpfRunner {
                         let ptr = event.as_ptr() as *const TrafficEvent;
                         let data = unsafe { ptr.read_unaligned() };
 
-                        let mut log_entry = String::new();
-                        log_entry.push_str(&format!(
-                        "FAMILY: {}, PROTOCOL: {}, SRC_ADDR: {}:{}, DST_ADDR: {}:{}, PACKET_ACTION: {}",
-                        data.family(),
-                        data.protocol(),
-                        data.src_addr(),
-                        data.src_port,
-                        data.dst_addr(),
-                        data.dst_port,
-                        data.tc_act.format(),
-                    ));
+                        let log_entry = vec![
+                            data.family().to_string(),
+                            data.protocol().to_string(),
+                            format!("{}:{}", data.src_addr(), data.src_port),
+                            format!("{}:{}", data.dst_addr(), data.dst_port),
+                            data.direction.format().to_string(),
+                            data.tc_act.format().to_string(),
+                        ];
 
-                        println!("{}", log_entry);
+                        let _ = tx_1.send(log_entry);
                     }
                 }
             });
 
+            let tx_2 = tx.clone();
             task::spawn(async move {
                 let mut buffers = (0..num_cpus)
                     .map(|_| BytesMut::with_capacity(std::mem::size_of::<TrafficEvent>()))
@@ -216,23 +246,124 @@ impl BpfRunner {
                         let ptr = event.as_ptr() as *const TrafficEvent;
                         let data = unsafe { ptr.read_unaligned() };
 
-                        let mut log_entry = String::new();
-                        log_entry.push_str(&format!(
-                        "FAMILY: {}, PROTOCOL: {}, SRC_ADDR: {}:{}, DST_ADDR: {}:{}, PACKET_ACTION: {}",
-                        data.family(),
-                        data.protocol(),
-                        data.src_addr(),
-                        data.src_port,
-                        data.dst_addr(),
-                        data.dst_port,
-                        data.tc_act.format(),
-                    ));
+                        let log_entry = vec![
+                            data.family().to_string(),
+                            data.protocol().to_string(),
+                            format!("{}:{}", data.src_addr(), data.src_port),
+                            format!("{}:{}", data.dst_addr(), data.dst_port),
+                            data.direction.format().to_string(),
+                            data.tc_act.format().to_string(),
+                        ];
 
-                        println!("{}", log_entry);
+                        let _ = tx_2.send(log_entry);
                     }
                 }
             });
         }
+
+        // List state
+        let mut items: Vec<Vec<String>> = Vec::new();
+
+        // for capturing ketboard events
+        let mut reader = EventStream::new();
+
+        loop {
+            let event = reader.next().fuse();
+
+            select! {
+                // Non-blocking receive
+                Some(new_item) = rx.recv() => {
+                    items.push(new_item);
+                }
+
+                // Keyboard event
+                maybe_event = event => {
+                    match maybe_event {
+                        Some(Ok(event)) => {
+                            match event {
+                                Event::Key(key) => {
+                                    match key.code {
+                                        KeyCode::Char('q') | KeyCode::Esc => break,
+                                        KeyCode::Down => {
+                                            if scroll_offset < items.len().saturating_sub(1) {
+                                                scroll_offset += 1;
+                                            }
+                                        }
+                                        KeyCode::Up => {
+                                            if scroll_offset > 0 {
+                                                scroll_offset -= 1;
+                                            }
+                                        }
+                                        _ => {},
+                                    };
+                                }
+                                Event::Resize(_x, _y) => {}
+                                _ => {}
+
+                            }
+                        }
+                        Some(Err(e)) => println!("Error: {:?}\r", e),
+                        None => {},
+                    }
+
+                }
+            };
+
+            // Draw UI
+            terminal.draw(|f| {
+                // for item in &items {
+                //     rows.push(Row::from_iter(item.clone()));
+                // }
+
+                // Update scroll offset to keep the latest rows in view
+                // if items.len() > 40 {
+                //     scroll_offset += 1;
+                // }
+
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(100)].as_ref())
+                    .split(f.area());
+
+                // Calculate the visible rows based on window height
+                let visible_row_count = (chunks[0].height as usize).saturating_sub(3); // Leave space for borders
+                let start_index = scroll_offset.min(items.len().saturating_sub(visible_row_count));
+                let end_index = (start_index + visible_row_count).min(items.len());
+
+                let table = Table::new(
+                    items[start_index..end_index]
+                        .iter()
+                        .map(|r| Row::new(r.clone())),
+                    widths,
+                )
+                .header(header.clone())
+                .block(
+                    Block::default()
+                        .title("Multi-Column List")
+                        .borders(Borders::ALL),
+                )
+                .column_spacing(1);
+
+                // let list_items: Vec<ListItem> = items
+                //     .iter()
+                //     .map(|item| ListItem::new(item.join(" ").clone()))
+                //     .collect();
+
+                // let list = List::new(list_items)
+                //     .block(Block::default().borders(Borders::ALL).title("Async List"));
+
+                f.render_widget(table, chunks[0]);
+            })?;
+
+            // Add a small delay to prevent 100% CPU usage
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        // Restore terminal state
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
         Ok(())
     }
 }

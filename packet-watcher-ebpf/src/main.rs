@@ -19,7 +19,7 @@ use network_types::{
     udp::UdpHdr,
 };
 
-use packet_watcher_common::{TcAct, TrafficEvent};
+use packet_watcher_common::{TcAct, TrafficDirection, TrafficEvent};
 
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
@@ -36,11 +36,6 @@ static mut INGRESS_EVENTS: PerfEventArray<TrafficEvent> = PerfEventArray::<Traff
 
 #[map]
 static mut EGRESS_EVENTS: PerfEventArray<TrafficEvent> = PerfEventArray::<TrafficEvent>::new(0);
-
-enum TrafficDirection {
-    Ingress,
-    Egress,
-}
 
 #[classifier]
 pub fn ingress_filter(ctx: TcContext) -> i32 {
@@ -61,6 +56,7 @@ unsafe fn try_ingress_filter(ctx: TcContext) -> Result<i32, c_long> {
     ingress_event.protocol = protocol as u8;
     ingress_event.src_addr = u32::from_be(unsafe { *ipv4_hdr }.src_addr);
     ingress_event.dst_addr = u32::from_be(unsafe { *ipv4_hdr }.dst_addr);
+    ingress_event.direction = TrafficDirection::Ingress;
 
     match (family, protocol) {
         (EtherType::Ipv4, IpProto::Tcp) => {
@@ -130,6 +126,7 @@ unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
     egress_event.protocol = protocol as u8;
     egress_event.src_addr = u32::from_be(unsafe { *ipv4_hdr }.src_addr);
     egress_event.dst_addr = u32::from_be(unsafe { *ipv4_hdr }.dst_addr);
+    egress_event.direction = TrafficDirection::Egress;
 
     match (family, protocol) {
         (EtherType::Ipv4, IpProto::Tcp) => {

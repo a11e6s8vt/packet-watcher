@@ -9,6 +9,7 @@ pub struct TrafficEvent {
     pub dst_addr: u32,
     pub src_port: u16,
     pub dst_port: u16,
+    pub direction: TrafficDirection,
     pub tc_act: TcAct,
 }
 
@@ -58,9 +59,25 @@ pub enum TcAct {
 impl TcAct {
     pub fn format(&self) -> &'static str {
         match self {
-            TcAct::Ok => "pass",
-            TcAct::Shot => "terminate",
-            TcAct::Pipe => "goto_next",
+            TcAct::Ok => "Accept",
+            TcAct::Shot => "Reject",
+            TcAct::Pipe => "Accept",
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+#[repr(C)]
+pub enum TrafficDirection {
+    Ingress,
+    Egress,
+}
+
+impl TrafficDirection {
+    pub fn format(&self) -> &'static str {
+        match self {
+            TrafficDirection::Ingress => "Incoming",
+            TrafficDirection::Egress => "Outgoing",
         }
     }
 }
