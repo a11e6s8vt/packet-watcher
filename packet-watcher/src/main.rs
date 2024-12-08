@@ -1,3 +1,5 @@
+mod tui;
+
 use aya::{
     include_bytes_aligned,
     maps::{AsyncPerfEventArray, MapData, MapError},
@@ -6,19 +8,15 @@ use aya::{
     Ebpf,
 };
 use crossterm::{
-    cursor,
-    event::{Event, EventStream, KeyCode},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{FutureExt, StreamExt};
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, Cell, Row, Table},
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use tui::{draw_ui, App};
+
+use futures::{FutureExt, StreamExt};
 
 use bytes::BytesMut;
 use clap::Parser;
@@ -29,7 +27,10 @@ use log::{debug, warn};
 use std::sync::Arc;
 use tokio::{
     select,
-    sync::{mpsc, Mutex},
+    sync::{
+        mpsc::{self, UnboundedSender},
+        Mutex,
+    },
     task,
 };
 
@@ -71,9 +72,69 @@ async fn main() -> anyhow::Result<()> {
     let runner = Arc::new(BpfRunner::new()?);
     runner.load().await?;
     let logger = runner.clone();
-    // tokio::spawn(async move { logger.display().await });
-    logger.display().await?;
 
+    // Channel for async updates
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<String>>();
+    tokio::spawn(async move { logger.display(tx.clone()).await });
+    // logger.display().await?;
+
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // for capturing ketboard events
+    let mut reader = EventStream::new();
+
+    // Create app and run it
+    let mut app = App::new();
+    loop {
+        let event = reader.next().fuse();
+        terminal.draw(|f| draw_ui(f, &mut app))?;
+        select! {
+            // Non-blocking receive
+            Some(new_item) = rx.recv() => {
+                app.add_row(new_item);
+            }
+
+            // Keyboard event
+            maybe_event = event => {
+                match maybe_event {
+                    Some(Ok(event)) => {
+                        match event {
+                            Event::Key(key) => {
+                                match key.code {
+                                    KeyCode::Char('q') => break,
+                                    KeyCode::Down => app.next(),
+                                    KeyCode::Up => app.previous(),
+                                    _ => {}
+                                };
+                            }
+                            Event::Resize(_x, _y) => {}
+                            _ => {}
+
+                        }
+                    }
+                    Some(Err(e)) => println!("Error: {:?}\r", e),
+                    None => {},
+                }
+
+            }
+        };
+    }
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    tc_cleanup();
     Ok(())
 }
 
@@ -151,41 +212,7 @@ impl BpfRunner {
         Ok(())
     }
 
-    async fn display(&self) -> anyhow::Result<()> {
-        // Setup terminal
-        enable_raw_mode()?;
-        let stdout = io::stdout();
-        execute!(std::io::stderr(), EnterAlternateScreen, cursor::Hide)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        // Header row
-        let header = Row::new(vec![
-            Cell::from("Family"),
-            Cell::from("Protocol"),
-            Cell::from("Local Addr."),
-            Cell::from("Remote Addr."),
-            Cell::from("Direction"),
-            Cell::from("Action"),
-            Cell::from("Reason for Action"),
-        ]);
-
-        let widths = [
-            Constraint::Percentage(13),
-            Constraint::Percentage(13),
-            Constraint::Percentage(16),
-            Constraint::Percentage(16),
-            Constraint::Percentage(13),
-            Constraint::Percentage(13),
-            Constraint::Percentage(16),
-        ];
-
-        // Track scroll position
-        let mut scroll_offset = 0;
-
-        // Channel for async updates
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<String>>();
-
+    async fn display(&self, tx: UnboundedSender<Vec<String>>) -> anyhow::Result<()> {
         let mut perf_array_ingress = self.read_ingress_events().await?;
         let mut perf_array_egress = self.read_egress_events().await?;
 
@@ -250,91 +277,6 @@ impl BpfRunner {
                 }
             });
         }
-
-        // List state
-        let mut items: Vec<Vec<String>> = Vec::new();
-
-        // for capturing ketboard events
-        let mut reader = EventStream::new();
-
-        loop {
-            let event = reader.next().fuse();
-
-            select! {
-                // Non-blocking receive
-                Some(new_item) = rx.recv() => {
-                    items.push(new_item);
-                }
-
-                // Keyboard event
-                maybe_event = event => {
-                    match maybe_event {
-                        Some(Ok(event)) => {
-                            match event {
-                                Event::Key(key) => {
-                                    match key.code {
-                                        KeyCode::Char('q') | KeyCode::Esc => break,
-                                        KeyCode::Down => {
-                                            if scroll_offset < items.len().saturating_sub(1) {
-                                                scroll_offset += 1;
-                                            }
-                                        }
-                                        KeyCode::Up => {
-                                            if scroll_offset > 0 {
-                                                scroll_offset -= 1;
-                                            }
-                                        }
-                                        _ => {},
-                                    };
-                                }
-                                Event::Resize(_x, _y) => {}
-                                _ => {}
-
-                            }
-                        }
-                        Some(Err(e)) => println!("Error: {:?}\r", e),
-                        None => {},
-                    }
-
-                }
-            };
-
-            // Draw UI
-            terminal.draw(|f| {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(100)].as_ref())
-                    .split(f.area());
-
-                // Calculate the visible rows based on window height
-                let visible_row_count = (chunks[0].height as usize).saturating_sub(3); // Leave space for borders
-                let start_index = scroll_offset.min(items.len().saturating_sub(visible_row_count));
-                let end_index = (start_index + visible_row_count).min(items.len());
-
-                let table = Table::new(
-                    items[start_index..end_index]
-                        .iter()
-                        .map(|r| Row::new(r.clone())),
-                    widths,
-                )
-                .header(header.clone())
-                .block(
-                    Block::default()
-                        .title("Multi-Column List")
-                        .borders(Borders::ALL),
-                )
-                .column_spacing(1);
-                f.render_widget(table, chunks[0]);
-            })?;
-        }
-
-        // Restore terminal state
-        disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        terminal.show_cursor()?;
-
-        // cleanup tc qdisc configs
-        tc_cleanup();
 
         Ok(())
     }
