@@ -40,12 +40,20 @@ pub unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
             let tcp_hdr: *const TcpHdr =
                 unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
 
-            if unsafe { *tcp_hdr }.syn() == 0 || unsafe { *tcp_hdr }.ack() != 0 {
-                return Ok(TC_ACT_OK);
-            }
+            let ack_flag = unsafe { *tcp_hdr }.ack();
+            let syn_flag = unsafe { *tcp_hdr }.syn();
+
+            egress_event.syn = syn_flag;
+            egress_event.ack = ack_flag;
 
             egress_event.src_port = u16::from_be(unsafe { *tcp_hdr }.source);
             egress_event.dst_port = u16::from_be(unsafe { *tcp_hdr }.dest);
+
+            // Accept and proceed to the next packet unless "the SYN flag is set and ACK flag not set"
+            if syn_flag == 0 && ack_flag != 0 {
+                return Ok(TC_ACT_PIPE);
+            }
+
             return process_packet(
                 &ctx,
                 TcAct::Pipe,

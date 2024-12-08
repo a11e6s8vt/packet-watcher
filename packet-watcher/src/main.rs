@@ -167,15 +167,17 @@ impl BpfRunner {
             Cell::from("Remote Addr."),
             Cell::from("Direction"),
             Cell::from("Action"),
+            Cell::from("Reason for Action"),
         ]);
 
         let widths = [
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(16),
+            Constraint::Percentage(16),
+            Constraint::Percentage(13),
+            Constraint::Percentage(13),
+            Constraint::Percentage(16),
         ];
 
         // Track scroll position
@@ -213,6 +215,7 @@ impl BpfRunner {
                             format!("{}:{}", data.dst_addr(), data.dst_port),
                             data.direction.format().to_string(),
                             data.tc_act.format().to_string(),
+                            format!("{} -- {}", data.syn, data.ack),
                         ];
 
                         let _ = tx_1.send(log_entry);
@@ -239,6 +242,7 @@ impl BpfRunner {
                             format!("{}:{}", data.dst_addr(), data.dst_port),
                             data.direction.format().to_string(),
                             data.tc_act.format().to_string(),
+                            format!("{} -- {}", data.syn, data.ack),
                         ];
 
                         let _ = tx_2.send(log_entry);
