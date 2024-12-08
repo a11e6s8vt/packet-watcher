@@ -11,6 +11,8 @@ pub struct TrafficEvent {
     pub dst_port: u16,
     pub direction: TrafficDirection,
     pub tc_act: TcAct,
+    pub syn: u16,
+    pub ack: u16,
 }
 
 #[cfg(feature = "user")]
@@ -51,6 +53,7 @@ impl TrafficEvent {
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 pub enum TcAct {
+    Unspec,
     Ok,
     Shot,
     Pipe,
@@ -59,6 +62,7 @@ pub enum TcAct {
 impl TcAct {
     pub fn format(&self) -> &'static str {
         match self {
+            TcAct::Unspec => "Unspecified",
             TcAct::Ok => "Accept",
             TcAct::Shot => "Reject",
             TcAct::Pipe => "Accept",
