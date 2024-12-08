@@ -71,12 +71,11 @@ async fn main() -> anyhow::Result<()> {
 
     let runner = Arc::new(BpfRunner::new()?);
     runner.load().await?;
-    let logger = runner.clone();
+    let data_processor = runner.clone();
 
     // Channel for async updates
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<String>>();
-    tokio::spawn(async move { logger.display(tx.clone()).await });
-    // logger.display().await?;
+    tokio::spawn(async move { data_processor.process_kernel_bpf_data(tx.clone()).await });
 
     // Setup terminal
     enable_raw_mode()?;
@@ -207,12 +206,20 @@ impl BpfRunner {
             }
         }
 
+        // Example code to add IPs to the block_list in the kernerl side
+        // let block_list = bpf.map_mut("BLOCK_LIST").unwrap();
+        // block_list.insert(&Ipv4Addr::new(192, 168, 1, 1).into(), &0, 0)?;
+        // block_list.insert(&Ipv4Addr::new(192, 168, 1, 2).into(), &0, 0)?;
+
         drop(bpf);
 
         Ok(())
     }
 
-    async fn display(&self, tx: UnboundedSender<Vec<String>>) -> anyhow::Result<()> {
+    async fn process_kernel_bpf_data(
+        &self,
+        tx: UnboundedSender<Vec<String>>,
+    ) -> anyhow::Result<()> {
         let mut perf_array_ingress = self.read_ingress_events().await?;
         let mut perf_array_egress = self.read_egress_events().await?;
 
@@ -242,7 +249,6 @@ impl BpfRunner {
                             format!("{}:{}", data.dst_addr(), data.dst_port),
                             data.direction.format().to_string(),
                             data.tc_act.format().to_string(),
-                            format!("{} -- {}", data.syn, data.ack),
                         ];
 
                         let _ = tx_1.send(log_entry);
@@ -269,7 +275,6 @@ impl BpfRunner {
                             format!("{}:{}", data.dst_addr(), data.dst_port),
                             data.direction.format().to_string(),
                             data.tc_act.format().to_string(),
-                            format!("{} -- {}", data.syn, data.ack),
                         ];
 
                         let _ = tx_2.send(log_entry);

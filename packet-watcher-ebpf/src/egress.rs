@@ -1,8 +1,6 @@
 use aya_ebpf::{
     bindings::{TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT},
     cty::c_long,
-    macros::{classifier, map},
-    maps::PerfEventArray,
     programs::TcContext,
 };
 
@@ -42,9 +40,6 @@ pub unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
 
             let ack_flag = unsafe { *tcp_hdr }.ack();
             let syn_flag = unsafe { *tcp_hdr }.syn();
-
-            egress_event.syn = syn_flag;
-            egress_event.ack = ack_flag;
 
             egress_event.src_port = u16::from_be(unsafe { *tcp_hdr }.source);
             egress_event.dst_port = u16::from_be(unsafe { *tcp_hdr }.dest);

@@ -68,17 +68,15 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         Cell::from("Remote Addr."),
         Cell::from("Direction"),
         Cell::from("Action"),
-        Cell::from("Reason for Action"),
     ]);
 
     let widths = [
-        Constraint::Percentage(13),
-        Constraint::Percentage(13),
         Constraint::Percentage(16),
         Constraint::Percentage(16),
-        Constraint::Percentage(13),
-        Constraint::Percentage(13),
-        Constraint::Percentage(16),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(14),
+        Constraint::Percentage(14),
     ];
 
     let rows = app.items.iter().map(|item| Row::new(item.clone()));
