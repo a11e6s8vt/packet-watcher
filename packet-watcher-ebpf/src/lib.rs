@@ -3,7 +3,7 @@
 pub(crate) mod egress;
 pub(crate) mod ingress;
 use aya_ebpf::{
-    bindings::{TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT},
+    bindings::{TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT, TC_ACT_UNSPEC},
     cty::c_long,
     macros::map,
     maps::PerfEventArray,
@@ -36,18 +36,17 @@ pub unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> 
 
 pub unsafe fn process_packet(
     ctx: &TcContext,
-    tc_act: TcAct,
     event: &mut TrafficEvent,
     direction: TrafficDirection,
 ) -> Result<i32, c_long> {
-    event.tc_act = tc_act;
+    // match direction {
+    //     TrafficDirection::Ingress => unsafe { INGRESS_EVENTS.output(ctx, event, 0) },
+    //     TrafficDirection::Egress => unsafe { EGRESS_EVENTS.output(ctx, event, 0) },
+    // }
 
-    match direction {
-        TrafficDirection::Ingress => unsafe { INGRESS_EVENTS.output(ctx, event, 0) },
-        TrafficDirection::Egress => unsafe { EGRESS_EVENTS.output(ctx, event, 0) },
-    }
-
-    Ok(match tc_act {
+    unsafe { INGRESS_EVENTS.output(ctx, event, 0) };
+    Ok(match event.tc_act {
+        TcAct::Unspec => TC_ACT_UNSPEC,
         TcAct::Ok => TC_ACT_OK,
         TcAct::Shot => TC_ACT_SHOT,
         TcAct::Pipe => TC_ACT_PIPE,

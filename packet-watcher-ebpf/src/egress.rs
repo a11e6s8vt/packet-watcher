@@ -49,17 +49,15 @@ pub unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
             egress_event.src_port = u16::from_be(unsafe { *tcp_hdr }.source);
             egress_event.dst_port = u16::from_be(unsafe { *tcp_hdr }.dest);
 
+            // Setting TcAct to TC_ACT_OK as a default value
+            egress_event.tc_act = TcAct::Ok;
+
             // Accept and proceed to the next packet unless "the SYN flag is set and ACK flag not set"
             if syn_flag == 0 && ack_flag != 0 {
                 return Ok(TC_ACT_PIPE);
             }
 
-            return process_packet(
-                &ctx,
-                TcAct::Pipe,
-                &mut egress_event,
-                TrafficDirection::Egress,
-            );
+            return process_packet(&ctx, &mut egress_event, TrafficDirection::Egress);
         }
         (EtherType::Ipv4, IpProto::Udp) => {
             // UDP Header - src port (2 octets - optional in ipv4)
@@ -69,19 +67,20 @@ pub unsafe fn try_egress_filter(ctx: TcContext) -> Result<i32, c_long> {
 
             egress_event.src_port = u16::from_be(unsafe { *udp_hdr }.source);
             egress_event.dst_port = u16::from_be(unsafe { *udp_hdr }.dest);
-            return process_packet(
-                &ctx,
-                TcAct::Pipe,
-                &mut egress_event,
-                TrafficDirection::Egress,
-            );
+
+            // Setting TcAct to TC_ACT_OK as a default value
+            egress_event.tc_act = TcAct::Ok;
+
+            return process_packet(&ctx, &mut egress_event, TrafficDirection::Egress);
         }
         // TODO:
         (EtherType::Ipv4, IpProto::Icmp) => {
             let icmp_hdr: *const IcmpHdr =
                 unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }.map_err(|_| -1)?;
             unsafe { *icmp_hdr }.type_;
-            return process_packet(&ctx, TcAct::Ok, &mut egress_event, TrafficDirection::Egress);
+            // Setting TcAct to TC_ACT_OK as a default value
+            egress_event.tc_act = TcAct::Ok;
+            return process_packet(&ctx, &mut egress_event, TrafficDirection::Egress);
         }
         (_, _) => return Ok(TC_ACT_OK),
     }

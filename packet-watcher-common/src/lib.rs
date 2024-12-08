@@ -53,6 +53,7 @@ impl TrafficEvent {
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 pub enum TcAct {
+    Unspec,
     Ok,
     Shot,
     Pipe,
@@ -61,6 +62,7 @@ pub enum TcAct {
 impl TcAct {
     pub fn format(&self) -> &'static str {
         match self {
+            TcAct::Unspec => "Unspecified",
             TcAct::Ok => "Accept",
             TcAct::Shot => "Reject",
             TcAct::Pipe => "Accept",
