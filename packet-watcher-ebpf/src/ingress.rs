@@ -67,6 +67,8 @@ unsafe fn track_syn_event(src_ip: u32) -> Result<TcAct, c_long> {
 }
 
 pub unsafe fn try_ingress_filter(ctx: TcContext) -> Result<i32, c_long> {
+    // 'ctx' contains the whole packet/datagram. 'ptr_at' is a helper function to
+    // get the different values from the packet
     let eth_hdr: EthHdr = ctx.load(0).map_err(|_| -1)?;
     let ipv4_hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN) }.map_err(|_| -1)?;
     let family = eth_hdr.ether_type;
